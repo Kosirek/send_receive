@@ -88,7 +88,7 @@ impl App{
         println!("Transmiting ....");
     }
 
-    fn receive_thread(msg_to_me: &std::sync::mpsc::Receiver<String>, timeout: u32) {
+    fn receive_thread(msg_to_me: &std::sync::mpsc::Receiver<String>, to_main: &std::sync::mpsc::SyncSender<String>, timeout: u32) {
         let start = Instant::now();
         let time_out = Duration::from_secs(timeout as u64);
 
@@ -107,7 +107,9 @@ impl App{
                 break 'klop;
             }
         }
+
         println!("Time spent in thread: {:?}", start.elapsed());
+        to_main.send("quiting".to_string()).unwrap();
     }
     
     fn run(self) {
@@ -115,12 +117,14 @@ impl App{
         
         let receive_handle: std::thread::JoinHandle<()>;
         let transmit_handle: std::thread::JoinHandle<()>;
-        let (trnsm, recv) = mpsc::sync_channel::<String>(100);
+        let (to_receiver, for_receiver) = mpsc::sync_channel::<String>(100);
+        let (form_threads, to_main) = mpsc::sync_channel::<String>(100);
+
 //        let tramsm2 = trnsm.clone();
 
         if self.dir == Direction::Receive || self.dir == Direction::SendReceive {
             println!("Starting receiving thread ....");
-            receive_handle = std::thread::spawn(move || { Self::receive_thread(&recv, self.receive_timeout) });
+            receive_handle = std::thread::spawn(move || { Self::receive_thread(&for_receiver, &form_threads, self.receive_timeout) });
         } else {
             receive_handle = std::thread::spawn(move || { });
         }
@@ -132,17 +136,28 @@ impl App{
             transmit_handle = std::thread::spawn(move || { });
         }
 
-        loop {
-            if let Ok(Event::Key(key)) = event::read() {
-                match key.code {
-                    KeyCode::Char('q') => {
-                        match trnsm.send("quit".to_string()) {
-                            _ => {}
+        'ThreadLoop: loop {
+            if event::poll(Duration::from_millis(10)).unwrap() {
+                if let Ok(Event::Key(key)) = event::read() {
+                    match key.code {
+                        KeyCode::Char('q') => {
+                            match to_receiver.send("quit".to_string()) {
+                                _ => {}
+                            }
+                            break 'ThreadLoop;
                         }
-                        break;
+                        _ => {}
                     }
-                    _ => {}
                 }
+            }
+
+            match to_main.recv_timeout(Duration::from_millis(10)) {
+                Ok(message) => {
+                    if message.contains("quiting") {
+                        break 'ThreadLoop;
+                    }        
+                }
+                _ => {}
             }
         }
 
