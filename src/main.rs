@@ -1,44 +1,47 @@
-use clap::Parser;
+use clap::{Parser, Args as OtherArgs};
 use core::fmt;
-#[allow(unused_imports)]
-use std::net::{SocketAddr, UdpSocket, IpAddr, Ipv4Addr};
-use std::str::FromStr;
-#[allow(unused_imports)]
-use std::thread::{self, JoinHandle, sleep};
-#[allow(unused_imports)]
-use std::sync::{mpsc, Arc};
-use std::time::{Duration, Instant};
-use crossterm::event::{KeyCode, Event};
 use crossterm::event;
+use crossterm::event::{Event, KeyCode};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::str::FromStr;
+use std::sync::mpsc;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 pub const TICK_FOR_OPERATION_TIMEOUT: u64 = 10;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None, author = "MK")]
 struct Args {
-    /// specifies if send thread needs to be started
-    #[arg(short, long, group="direction")]
-    send: bool,
-
-    /// specifies if receive thread needs to be started
-    #[arg(short, long, group="direction")]
-    receive: bool,
+    #[command(flatten)]
+    direct: GroupTry,
 
     /// specifies port for UDP communication
     #[arg(short, long, requires = "direction")]
-    port: Option<u16>,
+    port: u16,
 
     /// specifies IP address for UDP communication
     #[arg(short, long, requires = "direction")]
-    ip_address: Option<String>,
+    ip_address: String,
 
     /// specifies timeout for receive thread
     #[arg(short, long, requires = "direction")]
     timeout: Option<u32>,
 }
 
-#[derive(Debug)]
-#[derive(PartialEq)]
+#[derive(OtherArgs, Debug)]
+#[group(id="direction", multiple = true)]
+struct GroupTry {
+    /// specifies if send thread needs to be started
+    #[arg(short, long, group = "direction")]
+    send: bool,
+
+    /// specifies if receive thread needs to be started
+    #[arg(short, long, group = "direction")]
+    receive: bool,
+}
+
+#[derive(Debug, PartialEq)]
 enum Direction {
     None,
     Send,
@@ -66,16 +69,16 @@ impl std::fmt::Display for App {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "timeout: {} \ndirection: {} \n", self.receive_timeout, {
             match self.dir {
-                Direction::None => "no transmit".to_string(),
-                Direction::Receive => "only receiving".to_string(),
-                Direction::Send => "only transmiting".to_string(),
-                Direction::SendReceive => "sending and receiving".to_string(),
+                Direction::None => "No Transmit nor Receive".to_string(),
+                Direction::Receive => "Receiving....".to_string(),
+                Direction::Send => "Transmitting....".to_string(),
+                Direction::SendReceive => "Receiving and Transmitting....".to_string(),
             }
         })
     }
 }
 
-impl App{
+impl App {
     fn new() -> App {
         App {
             dir: Direction::None,
@@ -84,48 +87,49 @@ impl App{
         }
     }
 
-    fn transmit_thread(msg_to_me: &std::sync::mpsc::Receiver<String>, to_main: &std::sync::mpsc::SyncSender<String>, timeout: u32, ip_address: SocketAddr) {
+    fn transmit_thread(
+        msg_to_me: &std::sync::mpsc::Receiver<String>,
+        to_main: &std::sync::mpsc::SyncSender<String>,
+        timeout: u32,
+        ip_address: SocketAddr,
+    ) {
         let start = Instant::now();
         let time_out = Duration::from_secs(timeout as u64);
         let mut count = 0;
 
-        println!("Transmiting ....");
+        println!("Transmit thread started.");
 
-        let socket:UdpSocket;
-        let mut tx_sock_addr = ip_address.clone();
-        tx_sock_addr.set_port(tx_sock_addr.port() + 1);
-
-        match UdpSocket::bind(tx_sock_addr) {
-            Ok(sock) => socket = sock,
-            Err (_) => {
+        let target: SocketAddr =
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 2, 101)), 22223);
+        let socket = match UdpSocket::bind(ip_address) {
+            Ok(sock) => sock,
+            Err(_) => {
                 println!("Cannot bind to the socket");
                 println!("Time spent in thread: {:?}", start.elapsed());
                 to_main.send("quiting".to_string()).unwrap();
-                return;        
+                return;
             }
         };
-
+        let _ = socket.connect(target);
         // socket.set_broadcast(true).expect("Failed to set broadcast");
-        socket.connect(ip_address).unwrap();
-
         'klop: loop {
             match msg_to_me.recv_timeout(Duration::from_millis(TICK_FOR_OPERATION_TIMEOUT)) {
                 Ok(message) => {
                     if message.contains("quit") {
                         break;
-                    }        
+                    }
                 }
                 _ => {}
             }
-        
+
             if timeout != 0 && start.elapsed() >= time_out {
                 break 'klop;
             }
-        
+
             let mut message: Vec<u8> = (format!("$SCP,0,1,{}", count)).into_bytes().to_vec();
             println!("Sedning message: {:?}", message);
             count += 1;
-            match socket.send(&mut message) {
+            match socket.send_to(&mut message, ip_address) {
                 Ok(_) => {}
                 Err(e) => println!("packtet {} dropped with error: {:?}", count - 1, e),
             }
@@ -136,46 +140,59 @@ impl App{
         to_main.send("quiting".to_string()).unwrap();
     }
 
-    fn receive_thread(msg_to_me: &std::sync::mpsc::Receiver<String>, to_main: &std::sync::mpsc::SyncSender<String>, timeout: u32, ip_address: SocketAddr) {
+    fn receive_thread(
+        msg_to_me: &std::sync::mpsc::Receiver<String>,
+        to_main: &std::sync::mpsc::SyncSender<String>,
+        timeout: u32,
+        ip_address: SocketAddr,
+    ) {
         let start = Instant::now();
         let time_out = Duration::from_secs(timeout as u64);
 
-        println!("Receiving ....");
+        println!("Receive thread started.");
 
-        let socket:UdpSocket;
-        let mut tx_socket = ip_address;
-        tx_socket.set_port(tx_socket.port() + 1);
+        let socket: UdpSocket;
+        println!("Socket address: {:?}", ip_address);
 
         match UdpSocket::bind(ip_address) {
             Ok(sock) => socket = sock,
-            Err (_) => {
+            Err(_) => {
                 println!("Cannot bind to the socket");
                 println!("Time spent in thread: {:?}", start.elapsed());
                 to_main.send("quiting".to_string()).unwrap();
-                return;        
+                return;
             }
         };
-        socket.set_read_timeout(Some(Duration::from_millis(TICK_FOR_OPERATION_TIMEOUT))).unwrap();
-        socket.connect(tx_socket).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(TICK_FOR_OPERATION_TIMEOUT)))
+            .unwrap();
 
-        let mut rx_buf = vec![0u8; 4096];
-        rx_buf.clear();
+        let mut rx_buf = vec![0; 2048];
+        let mut pause: bool = false;
 
         'klop: loop {
-            match msg_to_me.recv_timeout(Duration::from_millis(TICK_FOR_OPERATION_TIMEOUT)) {
+            match msg_to_me.recv_timeout(Duration::from_millis(TICK_FOR_OPERATION_TIMEOUT * 10)) {
                 Ok(message) => {
                     if message.contains("quit") {
                         break;
-                    }        
+                    }
+                    if message.contains("pause") {
+                        pause = true;
+                    }
+                    if message.contains("restore") {
+                        pause = false;
+                    }
                 }
                 _ => {}
             }
-        
-            match socket.recv(& mut rx_buf) {
+
+            match socket.recv(&mut rx_buf) {
                 Ok(size) => {
                     if size != 0 {
-                        println!("Received: {:?}", rx_buf);
-                        rx_buf.clear();
+                        if pause == false {
+                            print!("{}", String::from_utf8_lossy(&rx_buf));
+                        }
+                        rx_buf.fill(0);
                     }
                 }
                 Err(_) => {}
@@ -188,10 +205,10 @@ impl App{
         println!("Time spent in thread: {:?}", start.elapsed());
         to_main.send("quiting".to_string()).unwrap();
     }
-    
+
     fn run(self) {
         println!("{}", self);
-        
+
         let receive_handle: std::thread::JoinHandle<()>;
         let transmit_handle: std::thread::JoinHandle<()>;
         let (to_receiver, for_receiver) = mpsc::sync_channel::<String>(100);
@@ -202,16 +219,30 @@ impl App{
 
         if self.dir == Direction::Receive || self.dir == Direction::SendReceive {
             println!("Starting receiving thread ....");
-            receive_handle = std::thread::spawn(move || { Self::receive_thread(&for_receiver, &form_threads, self.receive_timeout, self.ip_addr) });
+            receive_handle = std::thread::spawn(move || {
+                Self::receive_thread(
+                    &for_receiver,
+                    &form_threads,
+                    self.receive_timeout,
+                    self.ip_addr,
+                )
+            });
         } else {
-            receive_handle = std::thread::spawn(move || { });
+            receive_handle = std::thread::spawn(move || {});
         }
 
         if self.dir == Direction::Send || self.dir == Direction::SendReceive {
             println!("Starting transmiting thread ....");
-            transmit_handle = std::thread::spawn(move || { Self::transmit_thread(&for_transmiter, &form_threads2, self.receive_timeout, self.ip_addr) });
+            transmit_handle = std::thread::spawn(move || {
+                Self::transmit_thread(
+                    &for_transmiter,
+                    &form_threads2,
+                    self.receive_timeout,
+                    self.ip_addr,
+                )
+            });
         } else {
-            transmit_handle = std::thread::spawn(move || { });
+            transmit_handle = std::thread::spawn(move || {});
         }
 
         'ThreadLoop: loop {
@@ -227,6 +258,12 @@ impl App{
                             }
                             break 'ThreadLoop;
                         }
+                        KeyCode::Char('p') => match to_receiver.send("pause".to_string()) {
+                            _ => {}
+                        },
+                        KeyCode::Char('r') => match to_receiver.send("restore".to_string()) {
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
@@ -236,7 +273,7 @@ impl App{
                 Ok(message) => {
                     if message.contains("quiting") {
                         break 'ThreadLoop;
-                    }        
+                    }
                 }
                 _ => {}
             }
@@ -249,7 +286,6 @@ impl App{
         if self.dir == Direction::Send || self.dir == Direction::SendReceive {
             transmit_handle.join().unwrap();
         }
-
     }
 }
 
@@ -257,29 +293,27 @@ fn main() {
     let args: Args = Args::parse();
     let mut application: App = App::new();
 
-    if args.send == false && args.receive == true {
+    if args.direct.send == false && args.direct.receive == true {
         application.dir = Direction::Receive;
-    } else if args.send == true && args.receive == false {
+    } else if args.direct.send == true && args.direct.receive == false {
         application.dir = Direction::Send;
-    } else {
+    } else if args.direct.send == true && args.direct.receive == true {
         application.dir = Direction::SendReceive;
+    } else {
+        application.dir = Direction::None;
     }
 
-    if args.ip_address.is_some() {
-        application.ip_addr.set_ip(IpAddr::from_str(&args.ip_address.expect("Incorrect IP address")).expect("Incorrect IP address"));
-    }
+    application.ip_addr.set_ip(
+        IpAddr::from_str(&args.ip_address).expect("Incorrect IP address"));
 
-    if args.port.is_some() {
-        application.ip_addr.set_port(args.port.unwrap());
-    }
+    application.ip_addr.set_port(args.port);
 
     if args.timeout.is_some() {
         application.receive_timeout = args.timeout.unwrap();
     }
 
     match application.dir {
-        Direction::None => return, 
+        Direction::None => return,
         _ => application.run(),
     }
-
 }
