@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 pub const TICK_FOR_OPERATION_TIMEOUT: u64 = 10;
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None, author = "MK")]
+#[command(version, about, long_about = None, author = "MK", hide = false)]
+#[group(id="direction", multiple = false, required = true)]
 struct Args {
     #[command(flatten)]
     direct: GroupTry,
@@ -30,7 +31,6 @@ struct Args {
 }
 
 #[derive(OtherArgs, Debug)]
-#[group(id="direction", multiple = true)]
 struct GroupTry {
     /// specifies if send thread needs to be started
     #[arg(short, long, group = "direction")]
@@ -67,7 +67,7 @@ impl From<SocketAddr> for App {
 
 impl std::fmt::Display for App {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "timeout: {} \ndirection: {} \n", self.receive_timeout, {
+        write!(f, "Timeout: {} \nDirection: {} \n", self.receive_timeout, {
             match self.dir {
                 Direction::None => "No Transmit nor Receive".to_string(),
                 Direction::Receive => "Receiving....".to_string(),
